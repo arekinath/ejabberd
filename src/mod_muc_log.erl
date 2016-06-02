@@ -90,8 +90,11 @@ stop(Host) ->
     supervisor:delete_child(ejabberd_sup, Proc).
 
 add_to_log(Host, Type, Data, Room, Opts) ->
-    gen_server:cast(get_proc_name(Host),
-		    {add_to_log, Type, Data, Room, Opts}).
+    Now = p1_time_compat:timestamp(),
+    rpc:multicall(gen_server, cast, [
+	get_proc_name(Host),
+	{add_to_log, Type, Data, Room, Now, Opts}
+	  ]).
 
 check_access_log(Host, From) ->
     case catch gen_server:call(get_proc_name(Host),
@@ -179,6 +182,12 @@ handle_cast({add_to_log, Type, Data, Room, Opts}, State) ->
       _ -> ok
     end,
     {noreply, State};
+handle_cast({add_to_log, Type, Data, Room, Now, Opts}, State) ->
+    case catch add_to_log2(Type, Data, Room, Now, Opts, State) of
+      {'EXIT', Reason} -> ?ERROR_MSG("~p", [Reason]);
+      _ -> ok
+    end,
+    {noreply, State};
 handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info(_Info, State) -> {noreply, State}.
@@ -190,7 +199,11 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
-add_to_log2(text, {Nick, Packet}, Room, Opts, State) ->
+add_to_log2(Type, Data, Room, Opts, State) ->
+    Now = p1_time_compat:timestamp(),
+    add_to_log2(Type, Data, Room, Now, Opts, State).
+
+add_to_log2(text, {Nick, Packet}, Room, Now, Opts, State) ->
     case has_no_permanent_store_hint(Packet) of
 	false ->
 	    case {fxml:get_subtag(Packet, <<"subject">>),
@@ -199,43 +212,43 @@ add_to_log2(text, {Nick, Packet}, Room, Opts, State) ->
 		{false, false} -> ok;
 		{false, SubEl} ->
 		    Message = {body, fxml:get_tag_cdata(SubEl)},
-		    add_message_to_log(Nick, Message, Room, Opts, State);
+		    add_message_to_log(Nick, Message, Room, Now, Opts, State);
 		{SubEl, _} ->
 		    Message = {subject, fxml:get_tag_cdata(SubEl)},
-		    add_message_to_log(Nick, Message, Room, Opts, State)
+		    add_message_to_log(Nick, Message, Room, Now, Opts, State)
 	    end;
 	true -> ok
     end;
-add_to_log2(roomconfig_change, _Occupants, Room, Opts,
+add_to_log2(roomconfig_change, _Occupants, Room, Now, Opts,
 	    State) ->
     add_message_to_log(<<"">>, roomconfig_change, Room,
-		       Opts, State);
+		       Now, Opts, State);
 add_to_log2(roomconfig_change_enabledlogging, Occupants,
-	    Room, Opts, State) ->
+	    Room, Now, Opts, State) ->
     add_message_to_log(<<"">>,
-		       {roomconfig_change, Occupants}, Room, Opts, State);
-add_to_log2(room_existence, NewStatus, Room, Opts,
+		       {roomconfig_change, Occupants}, Room, Now, Opts, State);
+add_to_log2(room_existence, NewStatus, Room, Now, Opts,
 	    State) ->
     add_message_to_log(<<"">>, {room_existence, NewStatus},
-		       Room, Opts, State);
-add_to_log2(nickchange, {OldNick, NewNick}, Room, Opts,
+		       Room, Now, Opts, State);
+add_to_log2(nickchange, {OldNick, NewNick}, Room, Now, Opts,
 	    State) ->
     add_message_to_log(NewNick, {nickchange, OldNick}, Room,
-		       Opts, State);
-add_to_log2(join, Nick, Room, Opts, State) ->
-    add_message_to_log(Nick, join, Room, Opts, State);
-add_to_log2(leave, {Nick, Reason}, Room, Opts, State) ->
+		       Now, Opts, State);
+add_to_log2(join, Nick, Room, Now, Opts, State) ->
+    add_message_to_log(Nick, join, Room, Now, Opts, State);
+add_to_log2(leave, {Nick, Reason}, Room, Now, Opts, State) ->
     case Reason of
       <<"">> ->
-	  add_message_to_log(Nick, leave, Room, Opts, State);
+	  add_message_to_log(Nick, leave, Room, Now, Opts, State);
       _ ->
-	  add_message_to_log(Nick, {leave, Reason}, Room, Opts,
+	  add_message_to_log(Nick, {leave, Reason}, Room, Now, Opts,
 			     State)
     end;
-add_to_log2(kickban, {Nick, Reason, Code}, Room, Opts,
+add_to_log2(kickban, {Nick, Reason, Code}, Room, Now, Opts,
 	    State) ->
     add_message_to_log(Nick, {kickban, Code, Reason}, Room,
-		       Opts, State).
+		       Now, Opts, State).
 
 %%----------------------------------------------------------------------
 %% Core
@@ -335,7 +348,7 @@ htmlize_nick(Nick1, html) ->
 htmlize_nick(Nick1, plaintext) ->
     htmlize(<<?PLAINTEXT_IN/binary, Nick1/binary, ?PLAINTEXT_OUT/binary>>, plaintext).
 
-add_message_to_log(Nick1, Message, RoomJID, Opts,
+add_message_to_log(Nick1, Message, RoomJID, Now, Opts,
 		   State) ->
     #logstate{out_dir = OutDir, dir_type = DirType,
 	      dir_name = DirName, file_format = FileFormat,
@@ -346,7 +359,6 @@ add_message_to_log(Nick1, Message, RoomJID, Opts,
     Room = get_room_info(RoomJID, Opts),
     Nick = htmlize(Nick1, FileFormat),
     Nick2 = htmlize_nick(Nick1, FileFormat),
-    Now = p1_time_compat:timestamp(),
     TimeStamp = case Timezone of
 		  local -> calendar:now_to_local_time(Now);
 		  universal -> calendar:now_to_universal_time(Now)
